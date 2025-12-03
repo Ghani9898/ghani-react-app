@@ -1,0 +1,48 @@
+version: 0.2
+
+env:
+  variables:
+    CLUSTER_NAME: "my-react-cluster"
+    SERVICE_NAME: "my-react-service"
+    TASK_FAMILY: "my-react-task"
+    CONTAINER_NAME: "my-react-container"
+    REGION: "ca-central-1"
+    ACCOUNT_ID: "022660490677"
+    ECR_REPOSITORY: "my-react-repo"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging into Amazon ECR...
+      - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-8)
+      - echo IMAGE_TAG=$IMAGE_TAG
+      - REPO_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPOSITORY"
+
+  build:
+    commands:
+      - echo Building Docker image...
+      - docker build -t $REPO_URI:$IMAGE_TAG .
+      - docker tag $REPO_URI:$IMAGE_TAG $REPO_URI:latest
+
+  post_build:
+    commands:
+      - echo Pushing Docker images...
+      - docker push $REPO_URI:$IMAGE_TAG
+      - docker push $REPO_URI:latest
+
+      - echo Registering new task definition revision...
+      - TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY)
+      - NEW_TASK_DEF=$(echo $TASK_DEF \
+            | jq --arg IMAGE "$REPO_URI:$IMAGE_TAG" \
+            '.taskDefinition | .containerDefinitions[0].image = $IMAGE | {family, cpu, memory, networkMode, executionRoleArn, containerDefinitions, requiresCompatibilities}')
+      
+      - echo "$NEW_TASK_DEF" > new-task-def.json
+      - TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
+
+      - echo Updating ECS service...
+      - aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $TASK_DEF_ARN --force-new-deployment
+
+artifacts:
+  files:
+    - new-task-def.json
